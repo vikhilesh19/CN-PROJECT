@@ -51,6 +51,10 @@ for filename in os.listdir("cn_data"):
             room.setdefault("banned", [])
             room.setdefault("locked", False)
             room.setdefault("snapshots", [])
+            room.setdefault("chat_locked", False)
+            room.setdefault("chat_muted", [])
+            room.setdefault("chat_slow", 0)
+            room.setdefault("chat_last", {})
             room["raised_hands"] = set()
             room.update(users={}, redo=[], cursors={}, previews={})
             rooms[code] = room
@@ -72,7 +76,7 @@ def save_room(code):
     room = rooms[code]
     save("room_" + code + ".json", {
         k: v for k, v in room.items()
-        if k not in ("users", "redo", "cursors", "previews", "raised_hands")
+        if k not in ("users", "redo", "cursors", "previews", "raised_hands", "chat_last")
     })
 
 def state(room):
@@ -81,7 +85,10 @@ def state(room):
         "strokes": room["strokes"],
         "chat": room["chat"],
         "locked": room["locked"],
-        "owner": room["owner"]
+        "owner": room["owner"],
+        "chat_locked": room.get("chat_locked", False),
+        "chat_muted": room.get("chat_muted", []),
+        "chat_slow": room.get("chat_slow", 0)
     }
 
 def color_for(name):
@@ -101,7 +108,8 @@ def update_users(room):
                 "name": name,
                 "role": accounts[name]["role"],
                 "color": color_for(name),
-                "hand_raised": name in room.setdefault("raised_hands", set())
+                "hand_raised": name in room.setdefault("raised_hands", set()),
+                "chat_muted": name in room.get("chat_muted", [])
             }
             for name in room["users"].values()
         ]
@@ -254,6 +262,7 @@ def handle(sock, address):
                                     "password": password, "owner": username,
                                     "strokes": [], "chat": [], "ids": [],
                                     "banned": [], "locked": False, "ended": False,
+                                    "chat_locked": False, "chat_muted": [], "chat_slow": 0, "chat_last": {},
                                     "users": {}, "redo": [], "cursors": {},
                                     "previews": {}, "snapshots": [], "raised_hands": set()
                                 }
@@ -327,6 +336,51 @@ def handle(sock, address):
                         room = rooms[code]
                         if sock not in room["users"]:
                             break
+
+                        if action == "chat_settings":
+                            if room["owner"] != username:
+                                send(sock, {"type":"error","message":"Only the meeting owner can change chat settings"})
+                                continue
+                            operation = msg.get("operation")
+                            if operation == "lock":
+                                room["chat_locked"] = bool(msg.get("value"))
+                            elif operation == "slow":
+                                seconds = msg.get("seconds")
+                                if type(seconds) is not int or seconds not in (0, 5, 10, 30, 60):
+                                    continue
+                                room["chat_slow"] = seconds
+                            elif operation == "mute":
+                                target = str(msg.get("username", ""))
+                                if target not in room["users"].values() or target == room["owner"]:
+                                    send(sock, {"type":"error","message":"Select another connected participant"})
+                                    continue
+                                muted = room.setdefault("chat_muted", [])
+                                if bool(msg.get("value")):
+                                    if target not in muted: muted.append(target)
+                                elif target in muted: muted.remove(target)
+                            elif operation == "clear":
+                                room["chat"].clear()
+                                room["chat_last"] = {}
+                                room["ids"] = [e for e in room["ids"] if not isinstance(e, str) or not e.startswith("chat_")]
+                                save_room(code)
+                                broadcast(room, {"type":"chat_cleared"})
+                                continue
+                            elif operation == "delete":
+                                target_id = str(msg.get("id", ""))
+                                original = len(room["chat"])
+                                room["chat"] = [e for e in room["chat"] if e.get("id") != target_id]
+                                if len(room["chat"]) == original:
+                                    continue
+                                save_room(code)
+                                broadcast(room, {"type":"chat_deleted", "id":target_id})
+                                continue
+                            else:
+                                continue
+                            save_room(code)
+                            broadcast(room, {"type":"chat_settings_state", "locked":room.get("chat_locked",False),
+                                             "muted":room.get("chat_muted",[]),"slow":room.get("chat_slow",0)})
+                            update_users(room)
+                            continue
 
                         if action == "raise_hand":
                             raised = room.setdefault("raised_hands", set())
@@ -562,6 +616,16 @@ def handle(sock, address):
                                 room["previews"].pop(username, None)
                                 packet = {"type": "stroke", "stroke": entry}
                             else:
+                                import time
+                                privileged = username == room["owner"]
+                                now = time.monotonic()
+                                last = room.setdefault("chat_last", {}).get(username, -1e12)
+                                reason = ("Chat is locked" if room.get("chat_locked") and not privileged else
+                                          "You are muted" if username in room.get("chat_muted", []) and not privileged else
+                                          "Slow mode: wait before sending" if not privileged and now-last < room.get("chat_slow", 0) else None)
+                                if reason:
+                                    send(sock, {"type":"rejected", "id":event_id, "message":reason})
+                                    continue
                                 content = str(msg.get("text", "")).strip()[:500]
                                 if not content:
                                     continue
@@ -571,6 +635,7 @@ def handle(sock, address):
                                     "time": datetime.now().strftime("%H:%M")
                                 }
                                 room["chat"].append(entry)
+                                room.setdefault("chat_last", {})[username] = now
                                 packet = {"type": "chat", "entry": entry}
 
                             room["ids"].append(event_id)

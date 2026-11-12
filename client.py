@@ -214,6 +214,10 @@ class Whiteboard:
         self.tool_buttons = {}
         self.unread = 0
         self.chat_collapsed = False
+        self.chat_locked = False
+        self.chat_muted = []
+        self.chat_slow = 0
+        self.chat_settings_button = None
         self.toast_widget = None
         self.toast_timer = None
         try:
@@ -1573,9 +1577,15 @@ class Whiteboard:
             command=self.send_chat
         ).pack(fill="x")
 
-        self.chat_toggle = tk.Button(side, text="Group Chat ▾", command=self.toggle_chat,
+        chat_header = tk.Frame(side, bg=NAVY)
+        chat_header.pack(fill="x", pady=(15, 8))
+        self.chat_toggle = tk.Button(chat_header, text="Group Chat ▾", command=self.toggle_chat,
             bg=NAVY, fg=WHITE, relief="flat", anchor="w")
-        self.chat_toggle.pack(fill="x", pady=(15, 8))
+        self.chat_toggle.pack(side="left", fill="x", expand=True)
+        self.chat_settings_button = tk.Button(chat_header, text="⚙", bg=NAVY, fg=WHITE,
+            relief="flat", command=self.open_chat_settings, font=("Segoe UI", 13))
+        self.chat_settings_button.pack(side="right")
+        self.refresh_chat_settings_button()
 
         self.chat = tk.Text(
             side,
@@ -3390,6 +3400,51 @@ class Whiteboard:
 
     # ---------- CHAT ----------
 
+    def refresh_chat_settings_button(self):
+        if self.chat_settings_button and self.chat_settings_button.winfo_exists():
+            if self.owner:
+                self.chat_settings_button.pack(side="right")
+            else:
+                self.chat_settings_button.pack_forget()
+
+    def open_chat_settings(self):
+        if not self.owner or self.page != "board":
+            return
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Host Chat Settings")
+        dialog.geometry("380x490")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        body = tk.Frame(dialog, padx=18, pady=14)
+        body.pack(fill="both", expand=True)
+        def action(operation, **kwargs):
+            self.send({"type":"chat_settings", "operation":operation, **kwargs})
+        tk.Label(body, text="Group Chat Settings", font=("Segoe UI", 15, "bold")).pack(pady=6)
+        tk.Button(body, text="Unlock Chat" if self.chat_locked else "Lock Chat",
+            command=lambda: (action("lock", value=not self.chat_locked), dialog.destroy())).pack(fill="x", pady=5)
+        tk.Button(body, text="Clear All Messages", command=lambda: (
+            action("clear"), dialog.destroy()) if messagebox.askyesno("Clear Chat", "Delete all chat messages for everyone?", parent=dialog) else None).pack(fill="x", pady=5)
+        tk.Label(body, text="Slow Mode (seconds between messages)").pack(pady=(12,3))
+        slow = tk.StringVar(value=str(self.chat_slow))
+        ttk.Combobox(body, textvariable=slow, values=["0","5","10","30","60"], state="readonly").pack(fill="x")
+        tk.Button(body, text="Apply Slow Mode", command=lambda: action("slow", seconds=int(slow.get()))).pack(fill="x", pady=5)
+        tk.Label(body, text="Mute / Unmute Participant").pack(pady=(12,3))
+        names = [n for n in self.participants if n != self.meeting_owner]
+        chosen = tk.StringVar(value=names[0] if names else "")
+        ttk.Combobox(body, textvariable=chosen, values=names, state="readonly").pack(fill="x")
+        tk.Button(body, text="Mute", command=lambda: action("mute", username=chosen.get(), value=True)).pack(fill="x", pady=3)
+        tk.Button(body, text="Unmute", command=lambda: action("mute", username=chosen.get(), value=False)).pack(fill="x", pady=3)
+        tk.Label(body, text="Delete individual message").pack(pady=(12,3))
+        entries = [e for e in self.chat_history if not e.get("system") and e.get("id")]
+        labels = [f"{e.get('user','')}: {e.get('text','')[:35]}" for e in entries]
+        selected = tk.StringVar(value=labels[-1] if labels else "")
+        ttk.Combobox(body, textvariable=selected, values=labels, state="readonly").pack(fill="x")
+        def delete_selected():
+            if selected.get() in labels:
+                action("delete", id=entries[labels.index(selected.get())]["id"])
+                dialog.destroy()
+        tk.Button(body, text="Delete Selected Message", command=delete_selected).pack(fill="x", pady=5)
+
     def redraw_chat(self):
 
         if self.page != "board":
@@ -3428,6 +3483,9 @@ class Whiteboard:
             "time": datetime.now().strftime("%H:%M")
         }
 
+        if not self.owner and (self.chat_locked or self.username in self.chat_muted):
+            self.toast("Chat locked" if self.chat_locked else "You are muted", "warning")
+            return
         self.chat_history.append(entry)
         self.redraw_chat()
         self.message.delete(0, "end")
@@ -3867,6 +3925,9 @@ class Whiteboard:
             if e.get("type") == "chat"
         ]
 
+        self.chat_locked = msg.get("chat_locked", False)
+        self.chat_muted = msg.get("chat_muted", [])
+        self.chat_slow = msg.get("chat_slow", 0)
         self.locked = msg.get(
             "locked", False
         )
@@ -3891,6 +3952,7 @@ class Whiteboard:
             self.send(event)
 
         self.update_buttons()
+        self.refresh_chat_settings_button()
 
     def show_notice(self, title, message):
 
@@ -3947,6 +4009,7 @@ class Whiteboard:
             if self.page == "board":
                 self.toast(f"{self.meeting_owner} is now the meeting owner", "info")
                 self.update_buttons()
+                self.refresh_chat_settings_button()
             return
 
         elif kind == "generated_room_id":
@@ -4012,6 +4075,24 @@ class Whiteboard:
                         self.selected_text = None
                     self.update_text_selection()
                 self.save_local()
+
+        elif kind == "chat_settings_state" and self.page == "board":
+            self.chat_locked = bool(msg.get("locked", False))
+            self.chat_muted = msg.get("muted", [])
+            self.chat_slow = msg.get("slow", 0)
+            self.toast("Chat settings updated", "info")
+
+        elif kind == "chat_cleared" and self.page == "board":
+            self.chat_history = []
+            self.pending = [e for e in self.pending if e.get("type") != "chat"]
+            self.redraw_chat()
+            self.save_local()
+
+        elif kind == "chat_deleted" and self.page == "board":
+            self.chat_history = [e for e in self.chat_history if e.get("id") != msg.get("id")]
+            self.pending = [e for e in self.pending if e.get("id") != msg.get("id")]
+            self.redraw_chat()
+            self.save_local()
 
         elif kind == "chat" and self.page == "board":
 
@@ -4082,6 +4163,8 @@ class Whiteboard:
                 ]
 
                 self.redraw()
+                self.chat_history = [e for e in self.chat_history if e.get("id") != msg.get("id")]
+                self.redraw_chat()
 
             self.save_local()
 
