@@ -1482,6 +1482,9 @@ class Whiteboard:
             "<Button-1>", self.start
         )
         self.canvas.bind(
+            "<Double-Button-1>", self.double_click_object
+        )
+        self.canvas.bind(
             "<B1-Motion>", self.draw
         )
         self.canvas.bind(
@@ -2020,11 +2023,11 @@ class Whiteboard:
 
         x, y = self.canvas_position(event)
 
-        # Images and sticky notes can be grabbed directly, without Select.
+        # Existing shapes, images and sticky notes can be dragged directly.
         # Respect the same ownership and lock rules as the Select tool.
         self.direct_object_drag = False
         if self.tool != "select":
-            grabbed = self.find_object(x, y, kinds={"image", "sticky_note"})
+            grabbed = self.find_object(x, y, kinds=SHAPES | {"image", "sticky_note"})
             if grabbed:
                 self.selected_object = grabbed["id"]
                 self.object_drag = (x, y, list(grabbed["points"]), "move")
@@ -2086,6 +2089,25 @@ class Whiteboard:
                 [x, y, x, y],
                 force=True
             )
+
+    def double_click_object(self, event):
+        if self.locked and self.role != "host" and not self.owner:
+            return "break"
+        x, y = self.canvas_position(event)
+        found = self.find_object(x, y, kinds=SHAPES | {"image", "sticky_note"})
+        if found is None:
+            return
+        # Select mode exposes all four resize handles immediately.
+        self.direct_object_drag = False
+        self.object_drag = None
+        self.start_point = None
+        self.last = None
+        self.selected_object = found["id"]
+        self.tool_var.set("select")
+        self.select_tool()
+        self.selected_object = found["id"]
+        self.update_object_selection()
+        return "break"
 
     def draw(self, event):
 
