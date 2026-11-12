@@ -199,6 +199,7 @@ class Whiteboard:
         self.root.minsize(980, 620)
         self.root.configure(bg=BG)
 
+        self.dark_mode = False
         self.sock = None
         self.send_lock = threading.Lock()
 
@@ -1048,6 +1049,100 @@ class Whiteboard:
 
     # ---------- WHITEBOARD GUI ----------
 
+    def toggle_dark_mode(self):
+        if self.page != "board":
+            return
+        self.dark_mode = not self.dark_mode
+        self.apply_board_theme()
+
+    def apply_board_theme(self):
+        if self.page != "board":
+            return
+        dark = self.dark_mode
+        # Only theme the interface: drawing strokes, user-selected colors,
+        # selection handles and tool state are never modified.
+        palette = {
+            "#F1F5F9": "#0F172A",
+            "#FFFFFF": "#172033",
+            "#E2E8F0": "#263449",
+            "#E5E7EB": "#334155",
+            "#E0E7FF": "#303C64",
+            "#17243B": "#101A2E",
+            "#22324D": "#1A2940",
+            "#334155": "#25364E",
+            "#CBD5E1": "#516178",
+            "#475569": "#C4D2E6",
+            "#64748B": "#A7B7CC",
+            "#111827": "#E6EDF8",
+            "#C7D2FE": "#C7D2FE",
+        }
+        reverse = {v.upper(): k for k, v in palette.items()}
+        forward = {k.upper(): v for k, v in palette.items()}
+        colors = forward if dark else reverse
+
+        def convert(value):
+            return colors.get(str(value).upper(), value)
+
+        def recolor(widget):
+            try:
+                cls = widget.winfo_class()
+                if cls in ("Frame", "LabelFrame", "Canvas", "Label", "Button", "Entry", "Text", "Listbox"):
+                    opts = widget.configure()
+                    updates = {}
+                    for key in ("bg", "fg", "activebackground", "activeforeground",
+                                "insertbackground", "selectbackground", "highlightbackground"):
+                        if key in opts:
+                            old = widget.cget(key)
+                            new = convert(old)
+                            if key in ("fg", "activeforeground", "insertbackground"):
+                                # White text on dark controls must remain white.
+                                if str(old).upper() in ("#FFFFFF", "WHITE"):
+                                    new = "#FFFFFF"
+                                elif dark and str(old).upper() in ("#17243B", "#111827"):
+                                    new = "#E6EDF8"
+                                elif not dark and str(old).upper() == "#E6EDF8":
+                                    new = "#17243B"
+                            if new != old:
+                                updates[key] = new
+                    if updates:
+                        widget.configure(**updates)
+            except (tk.TclError, ValueError):
+                pass
+            for child in widget.winfo_children():
+                recolor(child)
+
+        recolor(self.root)
+        # Keep the title and room information readable on the navy header.
+        if hasattr(self, "board_header") and self.board_header.winfo_exists():
+            for child in self.board_header.winfo_children():
+                if isinstance(child, tk.Label) and child is not self.connection_pill:
+                    label_text = str(child.cget("text"))
+                    child.configure(fg="#FFFFFF" if label_text == "White Board" else "#C7D2FE")
+        self.root.configure(bg="#0F172A" if dark else BG)
+        self.canvas.configure(bg="#101827" if dark else WHITE)
+        self.theme_button.configure(text="☀" if dark else "☾")
+        style = ttk.Style()
+        style.configure("TFrame", background="#0F172A" if dark else BG)
+        style.configure("TLabel", background="#0F172A" if dark else BG,
+                        foreground="#E6EDF8" if dark else TEXT)
+        style.configure("Toolbar.TFrame", background="#172033" if dark else WHITE)
+        style.configure("Toolbar.TLabel", background="#172033" if dark else WHITE,
+                        foreground="#E6EDF8" if dark else TEXT)
+        style.configure("TEntry", fieldbackground="#263449" if dark else WHITE,
+                        foreground="#E6EDF8" if dark else TEXT)
+        style.configure("TSpinbox", fieldbackground="#263449" if dark else WHITE,
+                        foreground="#E6EDF8" if dark else TEXT)
+        style.configure("TCombobox", fieldbackground="#263449" if dark else WHITE,
+                        foreground="#E6EDF8" if dark else TEXT)
+        style.configure("Soft.TButton", background="#303C64" if dark else "#E0E7FF",
+                        foreground="#E6EDF8" if dark else BLUE)
+        # Preserve all shared whiteboard strokes; only recolor local grid lines.
+        if self.grid_visible:
+            self.canvas.itemconfigure("grid", fill="#334155" if dark else "#E9EDF4")
+        self.update_color_button()
+        self.refresh_tool_rail()
+        self.update_hand_button()
+
     def build_board(self):
 
         self.page = "board"
@@ -1113,6 +1208,14 @@ class Whiteboard:
 
         tk.Button(header, text="Copy invite", bg="#334155", fg="white",
             relief="flat", command=self.copy_invite).pack(side="left", padx=5)
+        self.theme_button = tk.Button(
+            header, text="☾", command=self.toggle_dark_mode,
+            bg="#334155", fg="#FFFFFF", activebackground="#475569",
+            activeforeground="#FFFFFF", relief="flat", bd=0,
+            font=("Segoe UI Symbol", 17), cursor="hand2", padx=9
+        )
+        self.theme_button.pack(side="right", padx=(4, 6))
+        self.bind_tooltip(self.theme_button, "Toggle dark / light mode")
         self.connection_pill = tk.Label(header, text="● Connected", bg="#065F46", fg="white",
             font=("Segoe UI", 9, "bold"), padx=9, pady=5)
         self.connection_pill.pack(side="right", padx=8)
@@ -1497,6 +1600,8 @@ class Whiteboard:
         # Install a high-priority binding tag on every board widget.  Unlike
         # an all-only binding, this runs before ttk buttons consume key events.
         self.root.after_idle(lambda: self.canvas.focus_set() if self.page == "board" else None)
+        if self.dark_mode:
+            self.root.after_idle(self.apply_board_theme)
 
     # ---------- INTERFACE HELPERS ----------
 
@@ -2661,9 +2766,9 @@ class Whiteboard:
     def draw_grid(self):
         # A local, non-exported visual guide; no extra shared strokes.
         for x in range(0, min(self.board_width, 10000)+1, 50):
-            self.canvas.create_line(x,0,x,min(self.board_height,10000),fill="#E9EDF4",tags="grid")
+            self.canvas.create_line(x,0,x,min(self.board_height,10000),fill="#334155" if self.dark_mode else "#E9EDF4",tags="grid")
         for y in range(0, min(self.board_height, 10000)+1, 50):
-            self.canvas.create_line(0,y,min(self.board_width,10000),y,fill="#E9EDF4",tags="grid")
+            self.canvas.create_line(0,y,min(self.board_width,10000),y,fill="#334155" if self.dark_mode else "#E9EDF4",tags="grid")
         self.canvas.tag_lower("grid")
 
     def toggle_grid(self):
