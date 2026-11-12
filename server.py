@@ -120,13 +120,17 @@ def remove(sock, code):
     room["previews"].pop(name, None)
     broadcast(room, {"type": "cursor_leave", "username": name})
     if room["owner"] not in room["users"].values():
-        hosts = [
-            n for n in room["users"].values()
-            if accounts[n]["role"] == "host"
-        ]
-        if hosts:
-            room["owner"] = hosts[0]
+        remaining = list(room["users"].values())
+        if remaining:
+            hosts = [n for n in remaining if accounts[n]["role"] == "host"]
+            room["owner"] = (hosts or remaining)[0]
             save_room(code)
+            broadcast(room, {"type": "owner_changed", "owner": room["owner"]})
+        else:
+            room["ended"] = True
+            save_room(code)
+            del rooms[code]
+            return
     update_users(room)
 
 def valid_points(points):
@@ -291,7 +295,31 @@ def handle(sock, address):
                                     send(sock, preview)
                             continue
 
+                        if action == "transfer_owner":
+                            if code not in rooms or sock not in rooms[code]["users"]:
+                                send(sock, {"type": "error", "message": "Not in a meeting"})
+                                continue
+                            room = rooms[code]
+                            target_name = str(msg.get("username", ""))
+                            if room["owner"] != username:
+                                send(sock, {"type": "error", "message": "Only the owner can transfer ownership"})
+                                continue
+                            if target_name == username or target_name not in room["users"].values():
+                                send(sock, {"type": "error", "message": "Choose a connected participant"})
+                                continue
+                            room["owner"] = target_name
+                            save_room(code)
+                            broadcast(room, {"type": "owner_changed", "owner": target_name})
+                            update_users(room)
+                            send(sock, {"type": "owner_transfer_success", "owner": target_name})
+                            continue
+
                         if action == "exit":
+                            if code in rooms and rooms[code]["owner"] == username:
+                                remaining = [n for c, n in rooms[code]["users"].items() if c != sock]
+                                if remaining:
+                                    send(sock, {"type": "error", "message": "Transfer ownership before leaving"})
+                                    continue
                             break
 
                         if code not in rooms:
@@ -366,7 +394,7 @@ def handle(sock, address):
                                 base = next((e for e in room["strokes"]
                                     if e.get("id") == target and e.get("shape") == "text"
                                     and e.get("user") == username), None)
-                                if ((room["locked"] and role != "host") or base is None or
+                                if ((room["locked"] and role != "host" and room["owner"] != username) or base is None or
                                         not valid_points([x, y, x, y]) or
                                         type(width) is not int or not 1 <= width <= 50):
                                     continue
@@ -394,7 +422,7 @@ def handle(sock, address):
                                 or not valid_style(color, width)
                             ):
                                 continue
-                            if visible and room["locked"] and role != "host":
+                            if visible and room["locked"] and role != "host" and room["owner"] != username:
                                 continue
                             packet = {
                                 "type": "shape_preview", "username": username,
@@ -417,7 +445,7 @@ def handle(sock, address):
                                 continue
 
                             if action == "stroke":
-                                if room["locked"] and role != "host":
+                                if room["locked"] and role != "host" and room["owner"] != username:
                                     send(sock, {
                                         "type": "rejected", "id": event_id,
                                         "message": "Board locked"
@@ -463,7 +491,7 @@ def handle(sock, address):
                                     target = str(msg.get("target", ""))[:100]
                                     prior = next((e for e in room["strokes"] if e.get("id") == target
                                         and e.get("shape") in ("image","sticky_note","line","rectangle","oval","circle","triangle")),None)
-                                    if prior is None or (role != "host" and prior["user"] != username):
+                                    if prior is None or (role != "host" and room["owner"] != username and prior["user"] != username):
                                         send(sock,{"type":"rejected","id":event_id,"message":"Cannot modify another user's object"})
                                         continue
                                     if any(e.get("shape")=="object_delete" and e.get("target")==target for e in room["strokes"]):
@@ -520,7 +548,7 @@ def handle(sock, address):
                                             continue
                                         if prior.get("shape") in ("eraser", "text_edit", "text_delete"):
                                             continue
-                                        if role != "host" and prior.get("user") != username:
+                                        if role != "host" and room["owner"] != username and prior.get("user") != username:
                                             continue
                                         px1, py1, px2, py2 = prior["points"]
                                         pad = prior.get("width", 1) / 2
@@ -555,7 +583,7 @@ def handle(sock, address):
                             send(sock, {"type": "ack", "id": event_id})
                             continue
 
-                        if action == "undo" and (not room["locked"] or role == "host"):
+                        if action == "undo" and (not room["locked"] or role == "host" or room["owner"] == username):
                             strokes = room["strokes"]
                             for i in range(len(strokes) - 1, -1, -1):
                                 if strokes[i]["user"] != username:
@@ -575,7 +603,7 @@ def handle(sock, address):
                                 broadcast(room, state(room))
                                 break
 
-                        elif action == "redo" and (not room["locked"] or role == "host"):
+                        elif action == "redo" and (not room["locked"] or role == "host" or room["owner"] == username):
                             for i in range(len(room["redo"]) - 1, -1, -1):
                                 items = room["redo"][i]
                                 if isinstance(items, dict):
@@ -608,7 +636,7 @@ def handle(sock, address):
                             save_room(code)
                             send(sock, {"type": "info", "message": "Board saved"})
 
-                        elif action == "remove_user" and role == "host":
+                        elif action == "remove_user" and (role == "host" or room["owner"] == username):
                             target_name = str(msg.get("username", ""))
                             if target_name in (username, room["owner"]):
                                 continue

@@ -1791,7 +1791,7 @@ class Whiteboard:
         self.root.after(3000, self.start_ping_loop)
 
     def participant_context_menu(self, event):
-        if self.role != "host" or not self.connected:
+        if not (self.role == "host" or self.owner) or not self.connected:
             return
         idx = self.users.nearest(event.y)
         if idx < 0 or idx >= len(self.participants):
@@ -2004,7 +2004,7 @@ class Whiteboard:
         if self.tool == "laser":
             return
 
-        if self.locked and self.role != "host":
+        if self.locked and self.role != "host" and not self.owner:
             return
 
         x, y = self.canvas_position(event)
@@ -2070,7 +2070,7 @@ class Whiteboard:
         if self.tool == "laser":
             return
 
-        if (self.locked and self.role != "host") or self.start_point is None:
+        if (self.locked and self.role != "host" and not self.owner) or self.start_point is None:
             return
 
         x1, y1 = self.start_point
@@ -2374,7 +2374,7 @@ class Whiteboard:
             self.canvas.tag_raise("text_selection")
 
     def edit_text(self, text_id, x, y, width=None):
-        if (self.locked and self.role != "host") or not self.connected or not text_id:
+        if (self.locked and self.role != "host" and not self.owner) or not self.connected or not text_id:
             return
         state = self.text_state(text_id)
         if state is None or state[2].get("user") != self.username:
@@ -2404,7 +2404,7 @@ class Whiteboard:
                 self.selected_object = None
                 return "break"
         if (self.page != "board" or self.tool != "text" or
-                not self.selected_text or (self.locked and self.role != "host") or not self.connected):
+                not self.selected_text or (self.locked and self.role != "host" and not self.owner) or not self.connected):
             return
         target = self.selected_text
         state = self.text_state(target)
@@ -2677,7 +2677,7 @@ class Whiteboard:
         for item in self.active_objects():
             a,b,c,d = item["points"]
             if min(a,c)-9 <= x <= max(a,c)+9 and min(b,d)-9 <= y <= max(b,d)+9:
-                if self.role == "host" or item.get("user") == self.username:
+                if self.role == "host" or self.owner or item.get("user") == self.username:
                     return item
         return None
 
@@ -2720,7 +2720,7 @@ class Whiteboard:
 
     def modify_object(self, target, points, delete=False):
         item = next((e for e in self.active_objects() if e["id"] == target), None)
-        if not item or (self.locked and self.role != "host") or not self.connected:
+        if not item or (self.locked and self.role != "host" and not self.owner) or not self.connected:
             return
         event = {"type":"stroke", "id":uuid.uuid4().hex,"user":self.username,
                  "shape":"object_delete" if delete else "object_edit",
@@ -2730,7 +2730,7 @@ class Whiteboard:
         self.redraw()
 
     def insert_image(self):
-        if self.page != "board" or (self.locked and self.role != "host") or not self.connected:
+        if self.page != "board" or (self.locked and self.role != "host" and not self.owner) or not self.connected:
             return
         try:
             from PIL import Image
@@ -3792,7 +3792,22 @@ class Whiteboard:
 
         kind = msg.get("type")
 
-        if kind == "generated_room_id":
+        if kind == "owner_transfer_success":
+            if getattr(self, "pending_owner_exit", False):
+                self.pending_owner_exit = False
+                self.save_local()
+                self.finish_close()
+            return
+
+        elif kind == "owner_changed":
+            self.meeting_owner = msg.get("owner", "")
+            self.owner = self.meeting_owner == self.username
+            if self.page == "board":
+                self.toast(f"{self.meeting_owner} is now the meeting owner", "info")
+                self.update_buttons()
+            return
+
+        elif kind == "generated_room_id":
             if self.page == "room_form" and hasattr(self, "room_id_field"):
                 self.room_id_field.set(msg.get("room", ""))
 
@@ -3954,7 +3969,7 @@ class Whiteboard:
             if self.page == "board":
                 self.toast("Board locked" if self.locked else "Board unlocked", "info")
 
-            if self.locked and self.role != "host" and self.page == "board":
+            if self.locked and self.role != "host" and not self.owner and self.page == "board":
 
                 if self.preview is not None:
 
@@ -4010,39 +4025,79 @@ class Whiteboard:
 
     # ---------- CLOSE ----------
 
+    def choose_new_owner(self):
+        candidates = [name for name in self.participants if name != self.username]
+        if not candidates:
+            return None
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Transfer Meeting Ownership")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        dialog.resizable(False, False)
+        tk.Label(dialog, text="Choose the new meeting owner before leaving:",
+                 padx=18, pady=12).pack()
+        choice = tk.StringVar(value=candidates[0])
+        selector = ttk.Combobox(dialog, textvariable=choice, values=candidates,
+                                state="readonly", width=28)
+        selector.pack(padx=18, pady=8)
+        result = {"name": None}
+        def confirm():
+            if choice.get() in candidates:
+                result["name"] = choice.get()
+                dialog.destroy()
+        controls = tk.Frame(dialog)
+        controls.pack(pady=12)
+        ttk.Button(controls, text="Transfer and Leave", command=confirm).pack(side="left", padx=6)
+        ttk.Button(controls, text="Cancel", command=dialog.destroy).pack(side="left", padx=6)
+        dialog.protocol("WM_DELETE_WINDOW", dialog.destroy)
+        self.root.wait_window(dialog)
+        return result["name"]
+
     def close(self):
         if self.closing:
             return
-
         if self.page == "board":
-            if self.role == "host" and self.owner:
-                choice = messagebox.askyesnocancel(
-                    "Exit Meeting",
-                    "Do you want to END the meeting for everyone?\n\n"
-                    "Yes = End meeting for everyone\n"
-                    "No = Leave meeting only\n"
-                    "Cancel = Stay in meeting",
-                    parent=self.root
-                )
-                if choice is None:
-                    return
-                if choice:
+            if self.owner:
+                others = [n for n in self.participants if n != self.username]
+                if not others:
+                    if not messagebox.askyesno("End Meeting",
+                            "You are the only participant. Leaving will end the meeting. Continue?",
+                            parent=self.root):
+                        return
                     if not self.connected:
-                        messagebox.showwarning(
-                            "Cannot End Meeting",
-                            "You must be connected to end the meeting for everyone.",
-                            parent=self.root
-                        )
+                        messagebox.showwarning("Offline", "Reconnect before ending the meeting.", parent=self.root)
                         return
                     self.send({"type": "end_meeting"})
+                else:
+                    choice = messagebox.askyesnocancel(
+                        "Exit Meeting",
+                        "End the meeting for everyone?\n\nYes = End meeting\nNo = Transfer ownership and leave\nCancel = Stay",
+                        parent=self.root)
+                    if choice is None:
+                        return
+                    if not self.connected:
+                        messagebox.showwarning("Offline", "Reconnect before leaving as owner.", parent=self.root)
+                        return
+                    if choice:
+                        self.send({"type": "end_meeting"})
+                    else:
+                        target = self.choose_new_owner()
+                        if not target:
+                            return
+                        self.send({"type": "transfer_owner", "username": target})
+                        # Wait for server confirmation before disconnecting.
+                        self.pending_owner_exit = True
+                        return
             else:
-                if not messagebox.askyesno(
-                    "Leave Meeting", "Do you want to leave the meeting?",
-                    parent=self.root
-                ):
+                if not messagebox.askyesno("Leave Meeting",
+                        "Do you want to leave the meeting?", parent=self.root):
                     return
             self.save_local()
+        self.finish_close()
 
+    def finish_close(self):
+        if self.closing:
+            return
         self.reset_notifications()
         self.closing = True
         if self.sock:
