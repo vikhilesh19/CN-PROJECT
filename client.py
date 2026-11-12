@@ -1138,6 +1138,16 @@ class Whiteboard:
             pady=(8, 3)
         )
 
+        # Toggle the entire left tool rail with a hamburger button.
+        self.tools_menu_button = tk.Button(
+            toolbar, text="☰", command=self.toggle_tool_rail,
+            bg="#E2E8F0", fg="#17243B", relief="flat",
+            font=("Segoe UI", 15, "bold"), padx=10, pady=0,
+            cursor="hand2"
+        )
+        self.tools_menu_button.pack(side="left", padx=(3, 8))
+        self.bind_tooltip(self.tools_menu_button, "Show or hide drawing tools")
+
         # Session actions live in the top bar; tools live in the left rail.
         self.tool_var = tk.StringVar(value=self.tool)
         self.size = tk.IntVar(value=3)
@@ -1254,7 +1264,10 @@ class Whiteboard:
         )
         side.pack_propagate(False)
 
+        # The tool rail can be hidden without destroying its buttons or state.
+        self.tool_rail_visible = True
         rail = tk.Frame(main, bg="#E2E8F0", width=108)
+        self.tool_rail = rail
         rail.pack(side="left", fill="y", padx=(0, 7))
         rail.pack_propagate(False)
         groups = [
@@ -1306,6 +1319,7 @@ class Whiteboard:
         self.refresh_tool_rail()
 
         canvas_frame = ttk.Frame(main)
+        self.canvas_frame = canvas_frame
         canvas_frame.pack(
             side="left",
             fill="both",
@@ -1541,6 +1555,21 @@ class Whiteboard:
             return
         self.tool_var.set(tool)
         self.select_tool()
+
+    def toggle_tool_rail(self):
+        if self.page != "board" or not hasattr(self, "tool_rail"):
+            return
+        if self.tool_rail_visible:
+            self.tool_rail.pack_forget()
+            self.tool_rail_visible = False
+        else:
+            self.tool_rail.pack(side="left", fill="y", padx=(0, 7),
+                                before=self.canvas_frame)
+            self.tool_rail_visible = True
+        self.tools_menu_button.configure(
+            bg="#4F46E5" if self.tool_rail_visible else "#E2E8F0",
+            fg="white" if self.tool_rail_visible else "#17243B"
+        )
 
     def refresh_tool_rail(self):
         for tool, button in self.tool_buttons.items():
@@ -3877,35 +3906,52 @@ class Whiteboard:
     # ---------- CLOSE ----------
 
     def close(self):
-
         if self.closing:
             return
 
         if self.page == "board":
+            if self.role == "host" and self.owner:
+                choice = messagebox.askyesnocancel(
+                    "Exit Meeting",
+                    "Do you want to END the meeting for everyone?\n\n"
+                    "Yes = End meeting for everyone\n"
+                    "No = Leave meeting only\n"
+                    "Cancel = Stay in meeting",
+                    parent=self.root
+                )
+                if choice is None:
+                    return
+                if choice:
+                    if not self.connected:
+                        messagebox.showwarning(
+                            "Cannot End Meeting",
+                            "You must be connected to end the meeting for everyone.",
+                            parent=self.root
+                        )
+                        return
+                    self.send({"type": "end_meeting"})
+            else:
+                if not messagebox.askyesno(
+                    "Leave Meeting", "Do you want to leave the meeting?",
+                    parent=self.root
+                ):
+                    return
             self.save_local()
 
         self.reset_notifications()
-
+        self.closing = True
         if self.sock:
-
-            self.send({
-                "type": "exit"
-            })
-
+            if self.connected:
+                self.send({"type": "exit"})
             try:
-
-                self.sock.shutdown(
-                    socket.SHUT_RDWR
-                )
-
-                self.sock.close()
-
+                self.sock.shutdown(socket.SHUT_RDWR)
             except OSError:
                 pass
-
+            try:
+                self.sock.close()
+            except OSError:
+                pass
             self.sock = None
-
-        self.closing = True
         self.root.destroy()
 
 
