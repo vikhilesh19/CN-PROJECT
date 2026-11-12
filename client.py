@@ -2020,6 +2020,19 @@ class Whiteboard:
 
         x, y = self.canvas_position(event)
 
+        # Images and sticky notes can be grabbed directly, without Select.
+        # Respect the same ownership and lock rules as the Select tool.
+        self.direct_object_drag = False
+        if self.tool != "select":
+            grabbed = self.find_object(x, y, kinds={"image", "sticky_note"})
+            if grabbed:
+                self.selected_object = grabbed["id"]
+                self.object_drag = (x, y, list(grabbed["points"]), "move")
+                self.direct_object_drag = True
+                self.start_point = (x, y)
+                self.last = (x, y)
+                self.show_object_preview(grabbed["points"])
+                return
         if self.grid_visible and self.tool in SHAPES:
             x, y = round(x / 50) * 50, round(y / 50) * 50
         self.start_point = (x, y)
@@ -2089,7 +2102,7 @@ class Whiteboard:
         if self.grid_visible and self.tool in SHAPES:
             x2, y2 = round(x2 / 50) * 50, round(y2 / 50) * 50
 
-        if self.tool == "select":
+        if self.tool == "select" or getattr(self, "direct_object_drag", False):
             if self.object_drag and self.selected_object:
                 sx, sy, original, mode = self.object_drag
                 dx, dy = x2 - sx, y2 - sy
@@ -2166,7 +2179,7 @@ class Whiteboard:
         if self.grid_visible and self.tool in SHAPES:
             x, y = round(x / 50) * 50, round(y / 50) * 50
 
-        if self.tool == "select":
+        if self.tool == "select" or getattr(self, "direct_object_drag", False):
             if self.object_drag and self.selected_object:
                 sx, sy, original, mode = self.object_drag
                 dx, dy = x - sx, y - sy
@@ -2174,7 +2187,9 @@ class Whiteboard:
                 if new != original:
                     self.modify_object(self.selected_object,new)
             self.object_drag = None
+            self.direct_object_drag = False
             self.start_point = None
+            self.last = None
             self.redraw()
             return
 
@@ -2684,8 +2699,10 @@ class Whiteboard:
             result["points"] = changes.get(item["id"], item["points"])
             yield result
 
-    def find_object(self, x, y):
+    def find_object(self, x, y, kinds=None):
         for item in self.active_objects():
+            if kinds is not None and item.get("shape") not in kinds:
+                continue
             a,b,c,d = item["points"]
             if min(a,c)-9 <= x <= max(a,c)+9 and min(b,d)-9 <= y <= max(b,d)+9:
                 if self.role == "host" or self.owner or item.get("user") == self.username:
