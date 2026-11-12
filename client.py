@@ -2281,8 +2281,8 @@ class Whiteboard:
             width = max(width, 10)
 
         elif shape == "highlighter":
-            width = max(width, 18)
-            color = self.lighten(color)
+            width = max(width * 4, 22)
+            width = min(width, 50)
 
         elif shape == "eraser":
             width = max(width, 18)
@@ -2653,12 +2653,13 @@ class Whiteboard:
                 outline="#64748B", width=1, tags=(tag,)
             )
             self.canvas.create_text(
-                x1 + 12, y1 + 12, anchor="nw",
+                x1 + 16, y1 + 22, anchor="nw",
                 text=stroke.get("text", ""),
                 fill=self.color_text(color),
-                font=("Segoe UI", 11), width=max(50, x2-x1-24),
-                tags=(tag,)
+                font=("Arial", 12), width=max(50, x2-x1-32),
+                tags=(tag, "sticky_note_text")
             )
+            self.canvas.tag_raise("sticky_note_text")
         elif shape == "text_delete":
             self.canvas.delete("textid_" + stroke.get("target", ""))
             return None
@@ -2690,13 +2691,25 @@ class Whiteboard:
 
         elif shape in FREE:
 
-            item = self.canvas.create_line(
-                *points,
-                fill=color,
-                width=width,
-                capstyle="round",
-                smooth=True
-            )
+            if shape == "highlighter":
+                item = self.canvas.create_line(
+                    *points, fill=color, width=width,
+                    capstyle="round", smooth=True,
+                    stipple="gray50", tags=("highlighter_stroke",)
+                )
+                # Keep lettering readable even when highlighting is added later.
+                self.canvas.tag_raise("sticky_note_text")
+                for text_item in self.canvas.find_all():
+                    if any(tag.startswith("textid_") for tag in self.canvas.gettags(text_item)):
+                        self.canvas.tag_raise(text_item)
+            else:
+                item = self.canvas.create_line(
+                    *points,
+                    fill=color,
+                    width=width,
+                    capstyle="round",
+                    smooth=True
+                )
 
         else:
 
@@ -2940,9 +2953,30 @@ class Whiteboard:
             def ordered_box(p):
                 return (min(p[0], p[2]), min(p[1], p[3]), max(p[0], p[2]), max(p[1], p[3]))
 
+            # Translucent highlighting is rendered before text and objects.
+            # This prevents a later highlighter stroke from obscuring letters.
+            highlight_layer = Image.new("RGBA", (board_w, board_h), (0, 0, 0, 0))
+            highlight_draw = ImageDraw.Draw(highlight_layer)
+            for h in self.strokes:
+                if h.get("shape") != "highlighter" or h.get("id") in erased or h.get("id") in deleted:
+                    continue
+                hp = h.get("points", [])
+                if not isinstance(hp, (tuple, list)) or len(hp) != 4:
+                    continue
+                hc = h.get("color", "#FFFF00")
+                try:
+                    from PIL import ImageColor
+                    rgb = ImageColor.getrgb(hc)
+                    hw = max(1, int(h.get("width", 22)))
+                    highlight_draw.line(tuple(hp), fill=(*rgb, 85), width=hw)
+                except (ValueError, TypeError):
+                    pass
+            result = Image.alpha_composite(result.convert("RGBA"), highlight_layer).convert("RGB")
+            draw = ImageDraw.Draw(result)
+
             for stroke in self.strokes:
                 shape = stroke.get("shape")
-                if shape in ("eraser", "object_edit", "object_delete", "text_edit", "text_delete", "laser"):
+                if shape in ("eraser", "object_edit", "object_delete", "text_edit", "text_delete", "laser", "highlighter"):
                     continue
                 sid = stroke.get("id")
                 if sid in erased or sid in deleted:
@@ -3063,6 +3097,8 @@ class Whiteboard:
             self.expand_for_stroke(rendered)
             self.paint(rendered)
 
+        # Keep note lettering above overlapping drawings and selection borders.
+        self.canvas.tag_raise("sticky_note_text")
         self.update_text_selection()
         self.update_object_selection()
         for name, data in text_previews:
