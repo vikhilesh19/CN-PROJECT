@@ -2873,48 +2873,140 @@ class Whiteboard:
         ttk.Button(dialog,text="Restore Selected Version",command=restore).pack(pady=4)
 
     def export_whiteboard(self, file_type):
-        """Export the currently visible canvas area, without altering board state."""
+        """Render the complete scrollable whiteboard, not a screen capture."""
         if self.page != "board":
             return
         try:
-            from PIL import ImageGrab
+            from PIL import Image, ImageDraw, ImageFont
         except ImportError:
-            messagebox.showerror(
-                "Pillow required",
-                "Install Pillow first:\npython -m pip install pillow"
-            )
+            messagebox.showerror("Pillow required", "Install Pillow: python -m pip install pillow")
             return
 
         extension = ".png" if file_type == "png" else ".pdf"
         selected = filedialog.asksaveasfilename(
-            title="Export whiteboard as " + file_type.upper(),
+            title="Export full whiteboard as " + file_type.upper(),
             defaultextension=extension,
             initialfile="whiteboard_" + self.room + extension,
-            filetypes=[("PNG image", "*.png")] if file_type == "png"
-                      else [("PDF document", "*.pdf")]
+            filetypes=[("PNG image", "*.png")] if file_type == "png" else [("PDF document", "*.pdf")]
         )
         if not selected:
             return
-
         try:
-            self.root.update_idletasks()
-            x = self.canvas.winfo_rootx()
-            y = self.canvas.winfo_rooty()
-            w = self.canvas.winfo_width()
-            h = self.canvas.winfo_height()
-            if w <= 1 or h <= 1:
-                raise RuntimeError("Whiteboard is not visible")
-            # Screen capture exports the exact viewport users can see.
-            captured = ImageGrab.grab(bbox=(x, y, x + w, y + h))
+            import math
+            import base64 as _base64
+            import io as _io
+            from PIL import Image, ImageDraw, ImageFont
+
+            # Board dimensions are document coordinates, independent of scroll position.
+            board_w = max(1, int(self.board_width))
+            board_h = max(1, int(self.board_height))
+            # Guard against accidentally allocating an enormous image.
+            if board_w * board_h > 120000000:
+                raise ValueError("Whiteboard too large for one image")
+            background = "#101827" if self.dark_mode else "#FFFFFF"
+            result = Image.new("RGB", (board_w, board_h), background)
+            draw = ImageDraw.Draw(result)
+            if self.grid_visible:
+                grid_color = "#334155" if self.dark_mode else "#E9EDF4"
+                for x in range(0, board_w, 50):
+                    draw.line((x, 0, x, board_h), fill=grid_color)
+                for y in range(0, board_h, 50):
+                    draw.line((0, y, board_w, y), fill=grid_color)
+
+            erased = {t for e in self.strokes if e.get("shape") == "eraser" for t in e.get("targets", [])}
+            deleted = {e.get("target") for e in self.strokes if e.get("shape") in ("object_delete", "text_delete")}
+            object_updates = {e.get("target"): e.get("points") for e in self.strokes if e.get("shape") == "object_edit"}
+            text_updates = {e.get("target"): e for e in self.strokes if e.get("shape") == "text_edit"}
+
+            def font(size):
+                size = max(8, int(size))
+                for candidate in ("C:/Windows/Fonts/segoeui.ttf", "C:/Windows/Fonts/arial.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"):
+                    try:
+                        return ImageFont.truetype(candidate, size)
+                    except OSError:
+                        pass
+                return ImageFont.load_default()
+
+            def ordered_box(p):
+                return (min(p[0], p[2]), min(p[1], p[3]), max(p[0], p[2]), max(p[1], p[3]))
+
+            for stroke in self.strokes:
+                shape = stroke.get("shape")
+                if shape in ("eraser", "object_edit", "object_delete", "text_edit", "text_delete", "laser"):
+                    continue
+                sid = stroke.get("id")
+                if sid in erased or sid in deleted:
+                    continue
+                p = object_updates.get(sid, stroke.get("points", [0, 0, 0, 0]))
+                if not isinstance(p, (list, tuple)) or len(p) != 4:
+                    continue
+                x1, y1, x2, y2 = map(float, p)
+                color = stroke.get("color", "#4F46E5")
+                width = max(1, int(round(float(stroke.get("width", 2)))))
+                box = ordered_box((x1, y1, x2, y2))
+                if shape in ("pen", "freehand", "marker", "highlighter"):
+                    draw.line((x1, y1, x2, y2), fill=color, width=width)
+                    radius = width / 2
+                    draw.ellipse((x2-radius, y2-radius, x2+radius, y2+radius), fill=color)
+                elif shape == "line":
+                    draw.line((x1, y1, x2, y2), fill=color, width=width)
+                elif shape == "rectangle":
+                    draw.rectangle(box, outline=color, width=width)
+                elif shape == "oval":
+                    draw.ellipse(box, outline=color, width=width)
+                elif shape == "circle":
+                    side = min(abs(x2-x1), abs(y2-y1))
+                    cx = x1 + (side if x2 >= x1 else -side)
+                    cy = y1 + (side if y2 >= y1 else -side)
+                    draw.ellipse(ordered_box((x1, y1, cx, cy)), outline=color, width=width)
+                elif shape == "triangle":
+                    pts = [((x1+x2)/2, y1), (x1, y2), (x2, y2)]
+                    draw.line(pts + [pts[0]], fill=color, width=width, joint="curve")
+                elif shape == "image":
+                    try:
+                        raw = _base64.b64decode(stroke.get("image", ""))
+                        picture = Image.open(_io.BytesIO(raw)).convert("RGBA")
+                        iw, ih = max(1, int(abs(x2-x1))), max(1, int(abs(y2-y1)))
+                        picture = picture.resize((iw, ih), Image.Resampling.LANCZOS)
+                        result.paste(picture, (int(x1), int(y1)), picture)
+                    except Exception:
+                        pass
+                elif shape == "text":
+                    edit = text_updates.get(sid)
+                    if edit:
+                        x1, y1 = edit["points"][:2]
+                        width = max(1, int(edit.get("width", width)))
+                    draw.multiline_text((x1, y1), stroke.get("text", ""), fill=color,
+                                        font=font(max(12, width * 4)), spacing=3)
+                elif shape == "sticky_note":
+                    draw.rectangle((x1+4, y1+5, x2+4, y2+5), fill="#CBD5E1")
+                    draw.rectangle(box, fill=color, outline="#64748B", width=1)
+                    note_text = stroke.get("text", "")
+                    note_font = font(15)
+                    max_text_width = max(30, int(abs(x2-x1))-24)
+                    lines = []
+                    for paragraph in note_text.split("\n"):
+                        current = ""
+                        for word in paragraph.split(" "):
+                            candidate = (current + " " + word).strip()
+                            if current and draw.textbbox((0,0), candidate, font=note_font)[2] > max_text_width:
+                                lines.append(current)
+                                current = word
+                            else:
+                                current = candidate
+                        lines.append(current)
+                    try:
+                        text_color = self.color_text(color)
+                    except Exception:
+                        text_color = "#17243B"
+                    draw.multiline_text((x1+12, y1+12), "\n".join(lines), fill=text_color,
+                                        font=note_font, spacing=3)
+
             if file_type == "png":
-                captured.save(selected, "PNG")
+                result.save(selected, "PNG")
             else:
-                captured.convert("RGB").save(selected, "PDF", resolution=100.0)
-            messagebox.showinfo(
-                "Export successful",
-                "Whiteboard saved to:\n" + selected +
-                "\n\nExport includes the currently visible whiteboard area."
-            )
+                result.save(selected, "PDF", resolution=100.0)
+            self.toast("Full whiteboard exported: " + selected, "success")
         except Exception as error:
             messagebox.showerror("Export failed", str(error))
 
