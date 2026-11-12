@@ -260,13 +260,13 @@ def handle(sock, address):
                                 save_room(room_id)
                             else:
                                 if room_id not in rooms:
-                                    send(sock, {"type": "error", "message": "Room not found"})
+                                    send(sock, {"type": "error", "message": "No meeting exists with this Room ID."})
                                     continue
                                 if username in rooms[room_id]["banned"]:
                                     send(sock, {"type": "removed", "message": "Removed from room"})
                                     continue
                                 if rooms[room_id]["password"] != password:
-                                    send(sock, {"type": "error", "message": "Wrong room password"})
+                                    send(sock, {"type": "error", "message": "Incorrect room password."})
                                     continue
 
                             room = rooms[room_id]

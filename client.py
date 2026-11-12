@@ -1607,11 +1607,22 @@ class Whiteboard:
 
     def toast(self, message, level="info"):
         if self.page != "board":
-            # Non-board screens have no persistent status bar.
-            try:
-                self.root.title("White Board — " + str(message)[:80])
-            except tk.TclError:
-                pass
+            if self.toast_timer:
+                try:
+                    self.root.after_cancel(self.toast_timer)
+                except tk.TclError:
+                    pass
+            if self.toast_widget:
+                try:
+                    self.toast_widget.destroy()
+                except tk.TclError:
+                    pass
+            color = {"error": "#BE123C", "success": "#047857", "info": "#334155"}.get(level, "#334155")
+            self.toast_widget = tk.Label(self.root, text=str(message), bg=color, fg="white",
+                padx=18, pady=10, font=("Segoe UI", 10, "bold"))
+            self.toast_widget.place(relx=.5, rely=.86, anchor="center")
+            self.toast_widget.lift()
+            self.toast_timer = self.root.after(3000, self.dismiss_toast)
             return
         if self.toast_timer:
             try:
