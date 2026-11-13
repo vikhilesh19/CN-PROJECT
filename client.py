@@ -236,6 +236,8 @@ class Whiteboard:
         self.connected = False
         self.reconnecting = False
         self.reconnect_busy = False
+        self.recovery_sync_ready = False
+        self.recovery_resync_needed = False
         self.closing = False
         self.page = "login"
 
@@ -1610,6 +1612,7 @@ class Whiteboard:
         self.redraw()
         self.redraw_chat()
         self.start_ping_loop()
+        self.root.after(1200, self.retry_pending_sync)
         # Install a high-priority binding tag on every board widget.  Unlike
         # an all-only binding, this runs before ttk buttons consume key events.
         self.root.after_idle(lambda: self.canvas.focus_set() if self.page == "board" else None)
@@ -3732,6 +3735,19 @@ class Whiteboard:
             self.chat_history = []
             self.pending = []
 
+    def retry_pending_sync(self):
+        if self.closing:
+            return
+        if (self.page == "board" and self.connected and
+                self.recovery_sync_ready and self.pending):
+            for event in list(self.pending):
+                if event.get("type") in ("stroke", "chat"):
+                    self.send(event)
+        try:
+            self.root.after(1200, self.retry_pending_sync)
+        except (RuntimeError, tk.TclError):
+            pass
+
     def queue_event(self, event):
 
         self.pending.append(event)
@@ -3812,6 +3828,7 @@ class Whiteboard:
 
         self.sock = None
         self.connected = False
+        self.recovery_sync_ready = False
 
         try:
             sock.close()
@@ -3866,7 +3883,7 @@ class Whiteboard:
             try:
 
                 sock = socket.create_connection(
-                    (self.server_ip, 5000),
+                    (self.server_ip, self.server_port),
                     timeout=2
                 )
 
@@ -3908,6 +3925,8 @@ class Whiteboard:
             return
 
         self.sock = sock
+        self.recovery_sync_ready = False
+        self.recovery_resync_needed = True
 
         threading.Thread(
             target=self.receive,
@@ -3984,8 +4003,13 @@ class Whiteboard:
         self.redraw_chat()
         self.save_local()
 
+        self.recovery_sync_ready = True
         for event in list(self.pending):
-            self.send(event)
+            if event.get("type") in ("stroke", "chat"):
+                self.send(event)
+        if not self.pending and self.recovery_resync_needed:
+            self.recovery_resync_needed = False
+            self.send({"type": "sync_request"})
 
         self.update_buttons()
         self.refresh_chat_settings_button()
@@ -4183,6 +4207,10 @@ class Whiteboard:
 
             self.save_local()
             self.update_buttons()
+            if (self.recovery_sync_ready and not self.pending and
+                    self.recovery_resync_needed):
+                self.recovery_resync_needed = False
+                self.send({"type": "sync_request"})
 
         elif kind == "rejected":
 

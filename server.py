@@ -304,6 +304,11 @@ def handle(sock, address):
                                     send(sock, preview)
                             continue
 
+                        if action == "sync_request":
+                            if code in rooms and sock in rooms[code]["users"]:
+                                send(sock, state(rooms[code]))
+                            continue
+
                         if action == "transfer_owner":
                             if code not in rooms or sock not in rooms[code]["users"]:
                                 send(sock, {"type": "error", "message": "Not in a meeting"})
